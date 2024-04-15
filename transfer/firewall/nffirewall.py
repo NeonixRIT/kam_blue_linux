@@ -1,4 +1,5 @@
 import logging
+import re
 import signal
 import socket
 import subprocess
@@ -542,16 +543,18 @@ class Rule:
     def toggle_rule(self):
         self.enabled = RuleStatus.ON if self.enabled == RuleStatus.OFF else RuleStatus.OFF
 
-    def match(self, layers: list, source_ip: str, destination_ip: str, source_port: Port, destination_port: Port, direction: Direction) -> bool:
+    def match(self, pkt: sc_Packet, source_ip: str, destination_ip: str, source_port: Port, destination_port: Port, direction: Direction) -> bool:
         if self.enabled == RuleStatus.OFF:
             return False
 
         ip_match = (source_ip == self.ip or destination_ip == self.ip) or self.ip in WILDCARDS
 
         protocol_match = False
+        layers = re.findall(r'###\[ (\w+) \]###', pkt.show(dump=True))
         for layer in layers:
-            if str(layer.name).lower() == self.protocol.lower():
+            if layer.lower() == self.protocol.lower():
                 protocol_match = True
+                break
         protocol_match = protocol_match or self.protocol in WILDCARDS
 
         port_match = (source_port == self.port or destination_port == self.port) or self.port in WILDCARDS
@@ -575,6 +578,8 @@ class RulesTable:
         end_len = len(self.rules[rule.priority])
         if start_len != end_len:
             self.ids.add(rule.id)
+        self.save()
+        return self
 
     def __isub__(self, rule: Rule):
         if rule.priority in self.rules:
@@ -583,17 +588,21 @@ class RulesTable:
             end_len = len(self.rules[rule.priority])
             if start_len != end_len:
                 self.ids -= {rule.id}
+            self.save()
+        return self
     
     def __len__(self):
         return sum(len(rules) for rules in self.rules.values())
 
     def __iter__(self):
-        for _, rules in sorted(self.rules.items(), key=lambda x: x[0]):
-            for rule in sorted(rules, key=lambda x: x.id):
+        for items in sorted(self.rules.items(), key=lambda x: x[0]):
+            rules = items[1]
+            for rule in rules:
                 yield rule
 
     def get_rule_by_id(self, id: int) -> Rule:
-        for _, rules in self.rules.items():
+        for items in self.rules.items():
+            rules = items[1]
             for rule in rules:
                 if rule.id == id:
                     return rule
@@ -709,7 +718,6 @@ class Firewall:
         data = payload.get_payload()
         pkt: sc_Packet = IP(data)
         log_packet = self.status == Status.LOG
-        accept_packet = True
         try:
             layers = pkt.layers()
             layer = layers[-2] if isinstance(pkt.lastlayer(), Raw) else pkt.lastlayer()
@@ -722,54 +730,65 @@ class Firewall:
             # allow all rustdesk connections
             if src_ip in self.__interfaces['rustdesk'] or dst_ip in self.__interfaces['rustdesk']:
                 logging.debug(f'Allowing RustDesk packet: {pkt}')
-                payload.accept()
+                payload.accept() # due to competition rules, cannot drop packets
                 return
 
             # allow all sshjump connections
             if src_ip in self.__interfaces['sshjump'] or dst_ip in self.__interfaces['sshjump']:
                 logging.debug(f'Allowing SSHJump packet: {pkt}')
-                payload.accept()
+                payload.accept() # due to competition rules, cannot drop packets
                 return
 
             # allow localhost connections
             if src_ip in self.__interfaces['other'] and dst_ip in self.__interfaces['other']:
                 logging.debug(f'Allowing Localhost packet: {pkt}')
-                payload.accept()
+                payload.accept() # due to competition rules, cannot drop packets
                 return
 
-            # allow control connections
-            # anti-lockout rule
             if src_ip in self.__interfaces['control'] and dst_ip in self.__interfaces['other'] and transport_protocol is TCP:
                 logging.debug(f'Allowing Control packet: {pkt}')
-                payload.accept()
+                payload.accept() # due to competition rules, cannot drop packets
                 return
-
-            if self.status != Status.FILTER:
-                logging.debug(f'Firewall is not in filter mode. Accepting packet: [{src_ip} -> {dst_ip}] {pkt}')
-                payload.accept()
-                if log_packet:
-                    logging.info(f'Packet: {pkt}')
-                return
-
-            for _, rule in self.rules:
+            for rule in self.rules:
                 rule: Rule
-                if rule.match(layers, src_ip, dst_ip, src_port, dst_port, Direction.IN):
+                if rule.match(pkt, src_ip, dst_ip, src_port, dst_port, Direction.IN):
                     if rule.action == Action.ACCEPT:
-                        logging.debug(f'Accepting packet: {pkt}\n\tReason: {rule}')
-                        accept_packet = True
+                        logging.debug(f'Logging packet: {pkt}\n\tReason: {rule}')
+                        log_packet = True
                     elif rule.action == Action.DROP:
-                        logging.info(f'Dropping packet: {pkt}\n\tReason: {rule}')
-                        accept_packet = False
+                        logging.debug(f'Not logging packet: {pkt}\n\tReason: {rule}')
+                        log_packet = False
                     break
 
             if log_packet:
-                logging.info(f'Packet: {pkt}')
+                pid_dict = {}
+                if dst_port != 'any' and src_port != 'any':
+                    cmd1 = 'sudo ps -p $(sudo lsof -P -n -i:' + str(dst_port.port) + ' | grep -v PID | awk \'{print $2}\' | sort -n | uniq) | awk \'{$2=$3=$4=""; print $0}\' | grep -v PID'
+                    cmd2 = 'sudo ps -p $(sudo lsof -P -n -i:' + str(src_port.port) + ' | grep -v PID | awk \'{print $2}\' | sort -n | uniq) | awk \'{$2=$3=$4=""; print $0}\' | grep -v PID'
+                    pid_dict1 = {}
+                    pid_dict2 = {}
+                    stdout1, _ = run(cmd1)
+                    if stdout1:
+                        pid_dict1 = {pid: command for pid, command in [val.split('    ') for val in stdout1.split('\n')]}
+                    stdout2, _ = run(cmd2)
+                    if stdout2:
+                        pid_dict2 = {pid: command for pid, command in [val.split('    ') for val in stdout2.split('\n')]}
+                    pid_dict = {**pid_dict1, **pid_dict2}
 
-            if not accept_packet:
-                payload.drop()
-            else:
-                payload.accept()
-            print(f'Packet: {pkt[layer]}')
+                logging.info(f'Packet: {pkt}')
+                for pid, command in pid_dict.items():
+                    if not pid or not command:
+                        continue
+                    logging.info(f'PID: {pid} Command: {command}')
+                    files, _ = run('sudo lsof -p ' + pid.strip() + ' -F n | awk \'/n/ {print substr($0,2)}\' | sort | uniq')
+                    if not files:
+                        continue
+                    files = files.split('\n')
+                    for file in files:
+                        logging.info(f'\tFile: {file.strip()}')
+                logging.info(pkt.show(dump=True) + '\n\n\n\n')
+
+            payload.accept() # due to competition rules, cannot drop packets
             return
         except Exception as e:
             logging.error(f'Unable to handle packet {pkt}: {e}')
@@ -777,7 +796,7 @@ class Firewall:
                 payload.accept()
             except Exception as e:
                 logging.error(f'Unable to accept packet: {e}')
-                pass
+                raise e
             return
 
     def start(self):
@@ -1049,10 +1068,13 @@ class FirewallCTL:
             lock_file.flush()
 
         def sig_handler(sig, frame):
-            del_iptables(self.port_num, sig, frame)
+            del_iptables(self.firewall.id, sig, frame)
+
+        def null_sig_handler(sig, frame):
+            pass
 
         signal.signal(signal.SIGINT, sig_handler)
-        signal.signal(signal.SIGTERM, sig_handler)
+        signal.signal(signal.SIGTERM, null_sig_handler)
         signal.signal(signal.SIGQUIT, sig_handler)
         signal.signal(signal.SIGABRT, sig_handler)
         signal.signal(signal.SIGTSTP, sig_handler)

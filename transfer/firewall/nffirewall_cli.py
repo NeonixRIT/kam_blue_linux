@@ -411,18 +411,20 @@ def print_help():
     print('run <shell command> - Run a shell command on the server')
     print('show <info|rule <rule id>|rules|status> - Show information about the server')
     print('chstat <log|filter|stop|start> - Change the status of the server')
-    print('rules <add <src ip> <dst ip> <src port> <dst port> <proto>|del <rule id>|toggle <rule id>> - Add, delete or toggle a rule')
+    print('rules <add <rule prio> <ip> <proto> <port> <action> <direction>|del <rule id>|toggle <rule id>> - Add, delete or toggle a rule')
     print('auth <username>:<password> - Authenticate with the server')
     print('exit - Exit the CLI')
 
 
 def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((IP, int(PORT)))
-    s, d = do_handshake(sock)
-    if s is None or d is None:
-        print('Failed to establish session key.')
-        return
+    while True:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((IP, int(PORT)))
+        s, d = do_handshake(sock)
+        if s is None or d is None:
+            print('Failed to establish session key. Trying again...')
+            continue
+        break
 
     # print(f's: {s}, d: {d}') # comment out
 

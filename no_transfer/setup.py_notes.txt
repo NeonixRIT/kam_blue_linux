@@ -1,0 +1,9 @@
+The `new_password` default plaintext password is 0004
+if you want to change it the following process is used to encode and decode the password
+    plaintext -> base64 -> int base 10 -> hex
+
+    before running the command it decodes the password from the hex value
+    hex -> int base 10 -> base64 -> plaintext
+
+    ob_pw_len is the length of the password in bytes based on the 
+    length of the base64 encoded password 
