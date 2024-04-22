@@ -15,6 +15,22 @@ def change_user_passwords(ob_pw: str, ob_pw_len: int) -> None:
             os.system(f"echo '{username}:{b64decode(int(ob_pw, 16).to_bytes(ob_pw_len, byteorder='big')).decode()}' | chpasswd")
 
 
+def disable_unknown_users(known_usernames: list[str]) -> None:
+    '''
+    Change all user passwords except for grey/gray users
+    '''
+    with open('/etc/passwd', 'r') as f:
+        for user_line in f:
+            user_line = user_line.strip()
+            username = user_line.split(':')[0]
+            if 'grey' in username.lower() or 'gray' in username.lower():
+                continue
+            if username.lower() not in [uname.lower() for uname in known_usernames]:
+                os.system(f"usermod -L {username}")
+            else:
+                os.system(f"usermod -U {username}")
+
+
 def run_commands(commands_list: list[str]) -> None:
     for command in commands_list:
         os.system(command)
@@ -44,9 +60,11 @@ def main():
         'chmod +x /usr/sbin/chkrootkit', # make chkrootkit binary executable
         'chmod +x /usr/lib/chkrootkit/*', # make chkrootkit scripts executable
         'chmod +x /usr/sbin/xtables-nft-multi', # make xtables-nft-multi executable
-        'chmod +x ./files/lynis/lynis' # make lynis binary executable
+        'chmod +x ./files/lynis/lynis', # make lynis binary executable
+        'cp -r ./files/usr/lib/x86_64-linux-gnu/security/ /usr/lib/x86_64-linux-gnu/security/', # copy security files
     ]
     run_commands(commands_list)
+    disable_unknown_users(['root', 'grievous', 'sevander', 'yularen', 'titus', 'meero', 'Grey_Team'])
 
 
 if __name__ == '__main__':
